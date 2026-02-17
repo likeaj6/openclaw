@@ -1,43 +1,16 @@
 import fs from "node:fs";
-import type { CronJob } from "../types.js";
-import type { CronServiceState } from "./state.js";
+import {
+  buildDeliveryFromLegacyPayload,
+  hasLegacyDeliveryHints,
+  stripLegacyDeliveryFields,
+} from "../legacy-delivery.js";
 import { parseAbsoluteTimeMs } from "../parse.js";
 import { migrateLegacyCronPayload } from "../payload-migration.js";
 import { loadCronStore, saveCronStore } from "../store.js";
+import type { CronJob } from "../types.js";
 import { recomputeNextRuns } from "./jobs.js";
 import { inferLegacyName, normalizeOptionalText } from "./normalize.js";
-
-function hasLegacyDeliveryHints(payload: Record<string, unknown>) {
-  if (typeof payload.deliver === "boolean") {
-    return true;
-  }
-  if (typeof payload.bestEffortDeliver === "boolean") {
-    return true;
-  }
-  if (typeof payload.to === "string" && payload.to.trim()) {
-    return true;
-  }
-  return false;
-}
-
-function buildDeliveryFromLegacyPayload(payload: Record<string, unknown>) {
-  const deliver = payload.deliver;
-  const mode = deliver === false ? "none" : "announce";
-  const channelRaw =
-    typeof payload.channel === "string" ? payload.channel.trim().toLowerCase() : "";
-  const toRaw = typeof payload.to === "string" ? payload.to.trim() : "";
-  const next: Record<string, unknown> = { mode };
-  if (channelRaw) {
-    next.channel = channelRaw;
-  }
-  if (toRaw) {
-    next.to = toRaw;
-  }
-  if (typeof payload.bestEffortDeliver === "boolean") {
-    next.bestEffort = payload.bestEffortDeliver;
-  }
-  return next;
-}
+import type { CronServiceState } from "./state.js";
 
 function buildDeliveryPatchFromLegacyPayload(payload: Record<string, unknown>) {
   const deliver = payload.deliver;
@@ -102,21 +75,6 @@ function mergeLegacyDeliveryInto(
   return { delivery: next, mutated };
 }
 
-function stripLegacyDeliveryFields(payload: Record<string, unknown>) {
-  if ("deliver" in payload) {
-    delete payload.deliver;
-  }
-  if ("channel" in payload) {
-    delete payload.channel;
-  }
-  if ("to" in payload) {
-    delete payload.to;
-  }
-  if ("bestEffortDeliver" in payload) {
-    delete payload.bestEffortDeliver;
-  }
-}
-
 function normalizePayloadKind(payload: Record<string, unknown>) {
   const raw = typeof payload.kind === "string" ? payload.kind.trim().toLowerCase() : "";
   if (raw === "agentturn") {
@@ -169,7 +127,7 @@ function copyTopLevelAgentTurnFields(
     typeof raw.timeoutSeconds === "number" &&
     Number.isFinite(raw.timeoutSeconds)
   ) {
-    payload.timeoutSeconds = Math.max(1, Math.floor(raw.timeoutSeconds));
+    payload.timeoutSeconds = Math.max(0, Math.floor(raw.timeoutSeconds));
     mutated = true;
   }
 
@@ -304,6 +262,15 @@ export async function ensureLoaded(
     if (raw.description !== desc) {
       raw.description = desc;
       mutated = true;
+    }
+
+    if ("sessionKey" in raw) {
+      const sessionKey =
+        typeof raw.sessionKey === "string" ? normalizeOptionalText(raw.sessionKey) : undefined;
+      if (raw.sessionKey !== sessionKey) {
+        raw.sessionKey = sessionKey;
+        mutated = true;
+      }
     }
 
     if (typeof raw.enabled !== "boolean") {
