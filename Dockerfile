@@ -75,7 +75,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
 {
   "gateway": {
     "controlUi": {
-      "allowInsecureAuth": true
+      "allowInsecureAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true
     }
   }
 }
