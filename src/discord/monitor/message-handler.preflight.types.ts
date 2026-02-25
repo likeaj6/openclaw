@@ -5,6 +5,7 @@ import type { resolveAgentRoute } from "../../routing/resolve-route.js";
 import type { DiscordChannelConfigResolved, DiscordGuildEntryResolved } from "./allow-list.js";
 import type { DiscordChannelInfo } from "./message-utils.js";
 import type { DiscordSenderIdentity } from "./sender-identity.js";
+import type { ThreadBindingManager, ThreadBindingRecord } from "./thread-bindings.js";
 
 export type { DiscordSenderIdentity } from "./sender-identity.js";
 import type { DiscordThreadChannel } from "./threading.js";
@@ -51,6 +52,9 @@ export type DiscordMessagePreflightContext = {
   wasMentioned: boolean;
 
   route: ReturnType<typeof resolveAgentRoute>;
+  threadBinding?: ThreadBindingRecord;
+  boundSessionKey?: string;
+  boundAgentId?: string;
 
   guildInfo: DiscordGuildEntryResolved | null;
   guildSlug: string;
@@ -79,6 +83,8 @@ export type DiscordMessagePreflightContext = {
   canDetectMention: boolean;
 
   historyEntry?: HistoryEntry;
+  threadBindings: ThreadBindingManager;
+  discordRestFetch?: typeof fetch;
 };
 
 export type DiscordMessagePreflightParams = {
@@ -100,6 +106,8 @@ export type DiscordMessagePreflightParams = {
   guildEntries?: Record<string, DiscordGuildEntryResolved>;
   ackReactionScope: DiscordMessagePreflightContext["ackReactionScope"];
   groupPolicy: DiscordMessagePreflightContext["groupPolicy"];
+  threadBindings: ThreadBindingManager;
+  discordRestFetch?: typeof fetch;
   data: DiscordMessageEvent;
   client: Client;
 };

@@ -51,6 +51,8 @@ export function resolveFailoverStatus(reason: FailoverReason): number | undefine
       return 408;
     case "format":
       return 400;
+    case "model_not_found":
+      return 404;
     default:
       return undefined;
   }
@@ -159,6 +161,9 @@ export function resolveFailoverReasonFromError(err: unknown): FailoverReason | n
     return "auth";
   }
   if (status === 408) {
+    return "timeout";
+  }
+  if (status === 502 || status === 503 || status === 504) {
     return "timeout";
   }
   if (status === 400) {
