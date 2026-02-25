@@ -84,6 +84,21 @@ EOF
   echo "Config created. Set OPENAI_API_KEY env var for LLM access."
 fi
 
+# Ensure host-header origin fallback is always set (required for non-loopback)
+if command -v node >/dev/null 2>&1 && [ -f "$CONFIG_FILE" ]; then
+  node -e "
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));
+    if (!cfg.gateway) cfg.gateway = {};
+    if (!cfg.gateway.controlUi) cfg.gateway.controlUi = {};
+    if (!cfg.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback) {
+      cfg.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
+      fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2));
+      console.log('Patched config: enabled dangerouslyAllowHostHeaderOriginFallback');
+    }
+  " 2>/dev/null || true
+fi
+
 # Determine bind mode based on whether auth token is configured
 # --bind lan requires OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD
 BIND_MODE="loopback"
