@@ -8,16 +8,18 @@ const hoisted = vi.hoisted(() => {
   return { loadSessionStoreMock, scheduleFollowupDrainMock };
 });
 
-vi.mock("../../config/sessions.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../config/sessions.js")>();
+vi.mock("../../config/sessions.js", async () => {
+  const actual = await vi.importActual<typeof import("../../config/sessions.js")>(
+    "../../config/sessions.js",
+  );
   return {
     ...actual,
     loadSessionStore: (...args: unknown[]) => hoisted.loadSessionStoreMock(...args),
   };
 });
 
-vi.mock("./queue.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./queue.js")>();
+vi.mock("./queue.js", async () => {
+  const actual = await vi.importActual<typeof import("./queue.js")>("./queue.js");
   return {
     ...actual,
     scheduleFollowupDrain: (...args: unknown[]) => hoisted.scheduleFollowupDrainMock(...args),
@@ -34,8 +36,9 @@ const {
 
 describe("agent runner helpers", () => {
   beforeEach(() => {
-    hoisted.loadSessionStoreMock.mockClear();
-    hoisted.scheduleFollowupDrainMock.mockClear();
+    vi.useRealTimers();
+    hoisted.loadSessionStoreMock.mockReset();
+    hoisted.scheduleFollowupDrainMock.mockReset();
   });
 
   it("detects audio payloads from mediaUrl/mediaUrls", () => {
@@ -67,6 +70,30 @@ describe("agent runner helpers", () => {
     });
     expect(shouldEmitResult()).toBe(true);
     expect(shouldEmitOutput()).toBe(true);
+  });
+
+  it("caches session verbose reads briefly while still refreshing live changes", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    hoisted.loadSessionStoreMock.mockReturnValue({
+      "agent:main:main": { verboseLevel: "full" },
+    });
+    const shouldEmitOutput = createShouldEmitToolOutput({
+      sessionKey: "agent:main:main",
+      storePath: "/tmp/store.json",
+      resolvedVerboseLevel: "off",
+    });
+
+    expect(shouldEmitOutput()).toBe(true);
+    hoisted.loadSessionStoreMock.mockReturnValue({
+      "agent:main:main": { verboseLevel: "off" },
+    });
+    expect(shouldEmitOutput()).toBe(true);
+    expect(hoisted.loadSessionStoreMock).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(1_251);
+    expect(shouldEmitOutput()).toBe(false);
+    expect(hoisted.loadSessionStoreMock).toHaveBeenCalledTimes(2);
   });
 
   it("falls back when store read fails or session value is invalid", () => {

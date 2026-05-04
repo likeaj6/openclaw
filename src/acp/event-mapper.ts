@@ -5,8 +5,15 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from "@agentclientprotocol/sdk";
+import {
+  hasNonEmptyString,
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+  readStringValue,
+} from "../shared/string-coerce.js";
+import { asRecord } from "./record-shared.js";
 
-export type GatewayAttachment = {
+type GatewayAttachment = {
   type: string;
   mimeType: string;
   content: string;
@@ -95,12 +102,6 @@ function escapeResourceTitle(value: string): string {
   return escapeInlineControlChars(value).replace(/[()[\]]/g, (char) => `\\${char}`);
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
 function normalizeToolLocationPath(value: string): string | undefined {
   const trimmed = value.trim();
   if (
@@ -176,7 +177,7 @@ function collectLocationsFromTextMarkers(
   locations: Map<string, ToolCallLocation>,
 ): void {
   for (const match of text.matchAll(TOOL_RESULT_PATH_MARKER_RE)) {
-    const candidate = match[1]?.trim();
+    const candidate = normalizeOptionalString(match[1]);
     if (candidate) {
       addToolLocation(locations, candidate);
     }
@@ -186,9 +187,10 @@ function collectLocationsFromTextMarkers(
 function collectToolLocations(
   value: unknown,
   locations: Map<string, ToolCallLocation>,
-  state: { visited: number; depth: number },
+  state: { visited: number },
+  depth: number,
 ): void {
-  if (state.visited >= TOOL_LOCATION_MAX_NODES || state.depth > TOOL_LOCATION_MAX_DEPTH) {
+  if (state.visited >= TOOL_LOCATION_MAX_NODES || depth > TOOL_LOCATION_MAX_DEPTH) {
     return;
   }
   state.visited += 1;
@@ -202,8 +204,7 @@ function collectToolLocations(
   }
   if (Array.isArray(value)) {
     for (const item of value) {
-      collectToolLocations(item, locations, { visited: state.visited, depth: state.depth + 1 });
-      state.visited += 1;
+      collectToolLocations(item, locations, state, depth + 1);
       if (state.visited >= TOOL_LOCATION_MAX_NODES) {
         return;
       }
@@ -230,9 +231,11 @@ function collectToolLocations(
     }
   }
 
-  for (const nested of Object.values(record)) {
-    collectToolLocations(nested, locations, { visited: state.visited, depth: state.depth + 1 });
-    state.visited += 1;
+  for (const [key, nested] of Object.entries(record)) {
+    if (key === "content") {
+      continue;
+    }
+    collectToolLocations(nested, locations, state, depth + 1);
     if (state.visited >= TOOL_LOCATION_MAX_NODES) {
       return;
     }
@@ -304,14 +307,16 @@ export function formatToolTitle(
     const safe = raw.length > 100 ? `${raw.slice(0, 100)}...` : raw;
     return `${key}: ${safe}`;
   });
-  return `${base}: ${parts.join(", ")}`;
+  // Sanitize at the source so session updates and permission requests never
+  // inherit raw control bytes from untrusted tool arguments.
+  return escapeInlineControlChars(`${base}: ${parts.join(", ")}`);
 }
 
 export function inferToolKind(name?: string): ToolKind {
   if (!name) {
     return "other";
   }
-  const normalized = name.toLowerCase();
+  const normalized = normalizeLowercaseStringOrEmpty(name);
   if (normalized.includes("read")) {
     return "read";
   }
@@ -337,7 +342,7 @@ export function inferToolKind(name?: string): ToolKind {
 }
 
 export function extractToolCallContent(value: unknown): ToolCallContent[] | undefined {
-  if (typeof value === "string") {
+  if (hasNonEmptyString(value)) {
     return value.trim()
       ? [
           {
@@ -360,7 +365,7 @@ export function extractToolCallContent(value: unknown): ToolCallContent[] | unde
   const blocks = Array.isArray(record.content) ? record.content : [];
   for (const block of blocks) {
     const entry = asRecord(block);
-    if (entry?.type === "text" && typeof entry.text === "string" && entry.text.trim()) {
+    if (entry?.type === "text" && hasNonEmptyString(entry.text)) {
       contents.push({
         type: "content",
         content: {
@@ -376,15 +381,11 @@ export function extractToolCallContent(value: unknown): ToolCallContent[] | unde
   }
 
   const fallbackText =
-    typeof record.text === "string"
-      ? record.text
-      : typeof record.message === "string"
-        ? record.message
-        : typeof record.error === "string"
-          ? record.error
-          : undefined;
+    readStringValue(record.text) ??
+    readStringValue(record.message) ??
+    readStringValue(record.error);
 
-  if (!fallbackText?.trim()) {
+  if (!hasNonEmptyString(fallbackText)) {
     return undefined;
   }
 
@@ -402,7 +403,7 @@ export function extractToolCallContent(value: unknown): ToolCallContent[] | unde
 export function extractToolCallLocations(...values: unknown[]): ToolCallLocation[] | undefined {
   const locations = new Map<string, ToolCallLocation>();
   for (const value of values) {
-    collectToolLocations(value, locations, { visited: 0, depth: 0 });
+    collectToolLocations(value, locations, { visited: 0 }, 0);
   }
   return locations.size > 0 ? [...locations.values()] : undefined;
 }

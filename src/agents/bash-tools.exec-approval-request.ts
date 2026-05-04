@@ -1,4 +1,5 @@
 import type { ExecAsk, ExecSecurity, SystemRunApprovalPlan } from "../infra/exec-approvals.js";
+import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import {
   DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
@@ -7,15 +8,16 @@ import { callGatewayTool } from "./tools/gateway.js";
 
 export type RequestExecApprovalDecisionParams = {
   id: string;
-  command: string;
+  command?: string;
   commandArgv?: string[];
   systemRunPlan?: SystemRunApprovalPlan;
   env?: Record<string, string>;
-  cwd: string;
+  cwd: string | undefined;
   nodeId?: string;
   host: "gateway" | "node";
   security: ExecSecurity;
   ask: ExecAsk;
+  warningText?: string;
   agentId?: string;
   resolvedPath?: string;
   sessionKey?: string;
@@ -35,8 +37,8 @@ function buildExecApprovalRequestToolParams(
 ): ExecApprovalRequestToolParams {
   return {
     id: params.id,
-    command: params.command,
-    commandArgv: params.commandArgv,
+    ...(params.command ? { command: params.command } : {}),
+    ...(params.commandArgv ? { commandArgv: params.commandArgv } : {}),
     systemRunPlan: params.systemRunPlan,
     env: params.env,
     cwd: params.cwd,
@@ -44,6 +46,7 @@ function buildExecApprovalRequestToolParams(
     host: params.host,
     security: params.security,
     ask: params.ask,
+    warningText: params.warningText,
     agentId: params.agentId,
     resolvedPath: params.resolvedPath,
     sessionKey: params.sessionKey,
@@ -90,11 +93,7 @@ export async function registerExecApprovalRequest(
 ): Promise<ExecApprovalRegistration> {
   // Two-phase registration is critical: the ID must be registered server-side
   // before exec returns `approval-pending`, otherwise `/approve` can race and orphan.
-  const registrationResult = await callGatewayTool<{
-    id?: string;
-    expiresAtMs?: number;
-    decision?: string;
-  }>(
+  const registrationResult = await callGatewayTool(
     "exec.approval.request",
     { timeoutMs: DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS },
     buildExecApprovalRequestToolParams(params),
@@ -120,7 +119,7 @@ export async function waitForExecApprovalDecision(id: string): Promise<string | 
     return parseDecision(decisionResult).value;
   } catch (err) {
     // Timeout/cleanup path: treat missing/expired as no decision so askFallback applies.
-    const message = String(err).toLowerCase();
+    const message = normalizeLowercaseStringOrEmpty(String(err));
     if (message.includes("approval expired or not found")) {
       return null;
     }
@@ -150,15 +149,16 @@ export async function requestExecApprovalDecision(
 
 type HostExecApprovalParams = {
   approvalId: string;
-  command: string;
+  command?: string;
   commandArgv?: string[];
   systemRunPlan?: SystemRunApprovalPlan;
   env?: Record<string, string>;
-  workdir: string;
+  workdir: string | undefined;
   host: "gateway" | "node";
   nodeId?: string;
   security: ExecSecurity;
   ask: ExecAsk;
+  warningText?: string;
   agentId?: string;
   resolvedPath?: string;
   sessionKey?: string;
@@ -215,6 +215,7 @@ function buildHostApprovalDecisionParams(
     host: params.host,
     security: params.security,
     ask: params.ask,
+    warningText: params.warningText,
     ...buildExecApprovalRequesterContext({
       agentId: params.agentId,
       sessionKey: params.sessionKey,

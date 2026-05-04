@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export type DetectedPackageManager = "pnpm" | "bun" | "npm";
+type DetectedPackageManager = "pnpm" | "bun" | "npm";
 
 export async function detectPackageManager(root: string): Promise<DetectedPackageManager | null> {
   try {
@@ -19,7 +19,7 @@ export async function detectPackageManager(root: string): Promise<DetectedPackag
   if (files.includes("pnpm-lock.yaml")) {
     return "pnpm";
   }
-  if (files.includes("bun.lockb")) {
+  if (files.includes("bun.lock") || files.includes("bun.lockb")) {
     return "bun";
   }
   if (files.includes("package-lock.json")) {

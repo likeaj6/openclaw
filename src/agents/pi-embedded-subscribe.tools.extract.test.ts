@@ -1,13 +1,26 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { telegramPlugin } from "../../extensions/telegram/src/channel.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { createTestRegistry } from "../test-utils/channel-plugins.js";
+import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { extractMessagingToolSend } from "./pi-embedded-subscribe.tools.js";
+
+function normalizeTelegramMessagingTargetForTest(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  return trimmed ? `telegram:${trimmed}` : undefined;
+}
 
 describe("extractMessagingToolSend", () => {
   beforeEach(() => {
     setActivePluginRegistry(
-      createTestRegistry([{ pluginId: "telegram", plugin: telegramPlugin, source: "test" }]),
+      createTestRegistry([
+        {
+          pluginId: "telegram",
+          plugin: {
+            ...createChannelTestPluginBase({ id: "telegram" }),
+            messaging: { normalizeTarget: normalizeTelegramMessagingTargetForTest },
+          },
+          source: "test",
+        },
+      ]),
     );
   });
 
@@ -33,7 +46,7 @@ describe("extractMessagingToolSend", () => {
 
     expect(result?.tool).toBe("message");
     expect(result?.provider).toBe("slack");
-    expect(result?.to).toBe("channel:C1");
+    expect(result?.to).toBe("channel:c1");
   });
 
   it("accepts target alias when to is omitted", () => {
