@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+#
+# Render.com overlay image.
+#
+# Why this exists:
+#   Render caps build containers at 8 GB regardless of instance plan. The full
+#   openclaw Dockerfile builds the entire monorepo (pnpm install, ui:build,
+#   qa:lab:build, etc.) and exceeds that cap. This overlay starts from the
+#   upstream prebuilt image and just layers in the Render-specific entrypoint,
+#   so Render's build step is tiny and never touches the 8 GB limit.
+#
+# When you merge upstream/main, bump the pinned tag below to a recent release
+# from https://github.com/openclaw/openclaw/pkgs/container/openclaw (or use
+# `:latest` if you prefer the bleeding edge over reproducibility).
+FROM ghcr.io/openclaw/openclaw:2026.5.3-1
+
+# COPY/chown need root; upstream image runs as `node` by default.
+USER root
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh && chown node:node /app/docker-entrypoint.sh
+USER node
+
+# render.yaml `dockerCommand:` overrides this at runtime. The CMD is kept so
+# `docker run` against this image (without override) still gets the host-header
+# origin fallback config patch.
+CMD ["/app/docker-entrypoint.sh"]
