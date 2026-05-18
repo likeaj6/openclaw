@@ -5,7 +5,10 @@ services:
     plan: standard
     healthCheckPath: /health
     dockerfilePath: ./Dockerfile.render
-    dockerCommand: node openclaw.mjs gateway --allow-unconfigured --bind lan --port $PORT
+    # No dockerCommand: defer to Dockerfile.render's CMD so docker-entrypoint.sh
+    # actually runs. The entrypoint handles bind-mode selection, host-header
+    # origin fallback, schema drift repair (openclaw doctor --fix), and config
+    # bootstrap — all of which were silently bypassed while dockerCommand was set.
     envVars:
       - key: SETUP_PASSWORD
         sync: false

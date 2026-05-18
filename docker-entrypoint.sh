@@ -29,6 +29,17 @@ EOF
   echo "Config created. Set OPENAI_API_KEY env var for LLM access."
 fi
 
+# Heal schema drift in the persisted config. Upstream evolves schemas
+# (channel options, agent shapes, etc.) faster than our overlay tag bumps, so a
+# disk written by an older gateway can fail validation against the running
+# gateway. `openclaw doctor --fix` is the upstream-sanctioned repair tool.
+# Fail-open: if doctor errors, fall through and let the gateway emit its own
+# clearer message rather than crashing the entrypoint.
+if [ -f "$CONFIG_FILE" ] && command -v openclaw >/dev/null 2>&1; then
+  echo "Running openclaw doctor --fix to heal any schema drift…"
+  openclaw doctor --fix </dev/null 2>&1 || echo "openclaw doctor --fix exited non-zero (continuing)"
+fi
+
 # Ensure host-header origin fallback is always set (required for non-loopback)
 if command -v node >/dev/null 2>&1 && [ -f "$CONFIG_FILE" ]; then
   node -e "
