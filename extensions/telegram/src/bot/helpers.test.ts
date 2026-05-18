@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildTelegramInboundOriginTarget,
   buildTelegramRoutingTarget,
   buildTelegramThreadParams,
   buildTypingThreadParams,
@@ -178,6 +179,37 @@ describe("buildTelegramRoutingTarget", () => {
   });
 });
 
+describe("buildTelegramInboundOriginTarget", () => {
+  it.each([
+    {
+      name: "keeps DM topic thread ids out of the origin target",
+      chatId: 42,
+      thread: { id: 77, scope: "dm" as const },
+      expected: "telegram:42",
+    },
+    {
+      name: "keeps regular groups chat-scoped",
+      chatId: -100123,
+      thread: { scope: "none" as const },
+      expected: "telegram:-100123",
+    },
+    {
+      name: "keeps General forum topic chat-scoped",
+      chatId: -100123,
+      thread: { id: 1, scope: "forum" as const },
+      expected: "telegram:-100123",
+    },
+    {
+      name: "includes real forum topic ids",
+      chatId: -100123,
+      thread: { id: 42, scope: "forum" as const },
+      expected: "telegram:-100123:topic:42",
+    },
+  ])("$name", ({ chatId, thread, expected }) => {
+    expect(buildTelegramInboundOriginTarget(chatId, thread)).toBe(expected);
+  });
+});
+
 describe("buildTypingThreadParams", () => {
   it.each([
     { input: undefined, expected: undefined },
@@ -225,7 +257,6 @@ describe("normalizeForwardedContext", () => {
         date: 123,
       },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.from).toBe("Ada Lovelace (@ada)");
     expect(ctx?.fromType).toBe("user");
     expect(ctx?.fromId).toBe("42");
@@ -238,7 +269,6 @@ describe("normalizeForwardedContext", () => {
     const ctx = normalizeForwardedContext({
       forward_origin: { type: "hidden_user", sender_user_name: "Hidden Name", date: 456 },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.from).toBe("Hidden Name");
     expect(ctx?.fromType).toBe("hidden_user");
     expect(ctx?.fromTitle).toBe("Hidden Name");
@@ -260,7 +290,6 @@ describe("normalizeForwardedContext", () => {
         message_id: 42,
       },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.from).toBe("Tech News (Editor)");
     expect(ctx?.fromType).toBe("channel");
     expect(ctx?.fromId).toBe("-1001234");
@@ -285,7 +314,6 @@ describe("normalizeForwardedContext", () => {
         author_signature: "Admin",
       },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.from).toBe("Discussion Group (Admin)");
     expect(ctx?.fromType).toBe("chat");
     expect(ctx?.fromId).toBe("-1005678");
@@ -305,7 +333,6 @@ describe("normalizeForwardedContext", () => {
         message_id: 1,
       },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.fromSignature).toBe("New Sig");
     expect(ctx?.from).toBe("My Channel (New Sig)");
   });
@@ -320,7 +347,6 @@ describe("normalizeForwardedContext", () => {
         message_id: 1,
       },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.fromSignature).toBeUndefined();
     expect(ctx?.from).toBe("Updates");
   });
@@ -334,7 +360,6 @@ describe("normalizeForwardedContext", () => {
         message_id: 1,
       },
     } as any);
-    expect(ctx).not.toBeNull();
     expect(ctx?.from).toBe("News");
     expect(ctx?.fromSignature).toBeUndefined();
     expect(ctx?.fromChatType).toBe("channel");
@@ -364,7 +389,6 @@ describe("describeReplyTarget", () => {
         from: { id: 42, first_name: "Alice", is_bot: false },
       },
     } as any);
-    expect(result).not.toBeNull();
     expect(result?.body).toBe("Original message");
     expect(result?.sender).toBe("Alice");
     expect(result?.id).toBe("1");
@@ -493,11 +517,8 @@ describe("describeReplyTarget", () => {
         },
       },
     } as any);
-    expect(result).not.toBeNull();
     expect(result?.body).toBe("This is the forwarded content");
     expect(result?.id).toBe("2");
-    // The reply target's forwarded context should be included
-    expect(result?.forwardedFrom).toBeDefined();
     expect(result?.forwardedFrom?.from).toBe("Bob Smith (@bobsmith)");
     expect(result?.forwardedFrom?.fromType).toBe("user");
     expect(result?.forwardedFrom?.fromId).toBe("999");
@@ -524,8 +545,6 @@ describe("describeReplyTarget", () => {
         },
       },
     } as any);
-    expect(result).not.toBeNull();
-    expect(result?.forwardedFrom).toBeDefined();
     expect(result?.forwardedFrom?.from).toBe("Tech News (Editor)");
     expect(result?.forwardedFrom?.fromType).toBe("channel");
     expect(result?.forwardedFrom?.fromMessageId).toBe(456);
@@ -583,7 +602,6 @@ describe("describeReplyTarget", () => {
         },
       },
     } as any);
-    expect(result).not.toBeNull();
     expect(result?.id).toBe("4");
     expect(result?.forwardedFrom?.from).toBe("Eve Stone (@eve)");
     expect(result?.forwardedFrom?.fromType).toBe("user");
@@ -626,7 +644,7 @@ describe("getTelegramTextParts — binary caption filtering (#66647)", () => {
       message_id: 1,
     } as any);
     expect(result.text).toBe("");
-    expect(result.entities).toEqual([]);
+    expect(result.entities).toStrictEqual([]);
   });
 
   it("preserves normal caption text", () => {
@@ -649,7 +667,7 @@ describe("getTelegramTextParts — binary caption filtering (#66647)", () => {
       message_id: 1,
     } as any);
     expect(result.text).toBe("");
-    expect(result.entities).toEqual([]);
+    expect(result.entities).toStrictEqual([]);
   });
 });
 

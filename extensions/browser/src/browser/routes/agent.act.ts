@@ -654,6 +654,12 @@ export function registerBrowserAgentActRoutes(
             ssrfPolicy,
             signal: req.signal,
           });
+          if (result.blockedByDialog) {
+            return await jsonOk({
+              blockedByDialog: true,
+              browserState: result.browserState,
+            });
+          }
           switch (action.kind) {
             case "batch":
               return await jsonOk(
@@ -695,6 +701,7 @@ export function registerBrowserAgentActRoutes(
         res,
         ctx,
         targetId,
+        enforceCurrentUrlAllowed: true,
         run: async ({ profileCtx, cdpUrl, tab, resolveTabUrl }) => {
           if (getBrowserProfileCapabilities(profileCtx.profile).usesChromeMcp) {
             return jsonError(res, 501, EXISTING_SESSION_LIMITS.responseBody);

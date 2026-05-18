@@ -1,12 +1,17 @@
 import { hasAnyAuthProfileStoreSource } from "../../agents/auth-profiles/source-check.js";
+import { resolveAgentHarnessPolicy } from "../../agents/harness/selection.js";
+import { listOpenAIAuthProfileProvidersForAgentRuntime } from "../../agents/openai-codex-routing.js";
 import { retireSessionMcpRuntime } from "../../agents/pi-bundle-mcp-tools.js";
 import type { MessagingToolSend } from "../../agents/pi-embedded-messaging.types.js";
 import type { SkillSnapshot } from "../../agents/skills.js";
+import type { SourceReplyDeliveryMode } from "../../auto-reply/get-reply-options.types.js";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { CliDeps } from "../../cli/outbound-send-deps.js";
 import type { AgentDefaultsConfig } from "../../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
+import { isCommandLaneTaskTimeoutError } from "../../process/command-queue.js";
+import { CommandLane } from "../../process/lanes.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { resolveCronDeliveryPlan, type CronDeliveryPlan } from "../delivery-plan.js";
@@ -16,6 +21,7 @@ import {
   mergeCronRunDiagnostics,
 } from "../run-diagnostics.js";
 import type {
+  CronAgentExecutionPhaseUpdate,
   CronAgentExecutionStarted,
   CronDeliveryTrace,
   CronDeliveryTraceMessageTarget,
@@ -32,6 +38,7 @@ import {
 import { resolveCronModelSelection } from "./model-selection.js";
 import { buildCronAgentDefaultsConfig } from "./run-config.js";
 import {
+  adoptCronRunSessionMetadata,
   createPersistCronSessionEntry,
   markCronSessionPreRun,
   persistCronSkillsSnapshotIfChanged,
@@ -86,6 +93,9 @@ const cronDeliveryRuntimeLoader = createLazyImportLoader(() => import("./run-del
 const cronModelPreflightRuntimeLoader = createLazyImportLoader(
   () => import("./model-preflight.runtime.js"),
 );
+const runtimePluginsLoader = createLazyImportLoader(
+  () => import("./run-runtime-plugins.runtime.js"),
+);
 
 async function loadSessionStoreRuntime() {
   return await sessionStoreRuntimeLoader.load();
@@ -119,6 +129,10 @@ async function loadCronModelPreflightRuntime() {
   return await cronModelPreflightRuntimeLoader.load();
 }
 
+async function loadRuntimePlugins() {
+  return await runtimePluginsLoader.load();
+}
+
 function hasConfiguredAuthProfiles(cfg: OpenClawConfig): boolean {
   return (
     Boolean(cfg.auth?.profiles && Object.keys(cfg.auth.profiles).length > 0) ||
@@ -128,6 +142,10 @@ function hasConfiguredAuthProfiles(cfg: OpenClawConfig): boolean {
 
 function resolveNonNegativeNumber(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function isCronNestedLaneTaskTimeoutError(err: unknown): boolean {
+  return isCommandLaneTaskTimeoutError(err, CommandLane.CronNested);
 }
 
 async function retireRolledCronSessionMcpRuntime(params: {
@@ -309,6 +327,21 @@ function resolveCronToolPolicy(params: { deliveryMode: "announce" | "webhook" | 
   };
 }
 
+function resolveCronSourceReplyDeliveryMode(params: {
+  deliveryPlan: CronDeliveryPlan;
+  resolvedDelivery: ResolvedCronDeliveryTarget;
+  toolPolicy: ReturnType<typeof resolveCronToolPolicy>;
+}): SourceReplyDeliveryMode | undefined {
+  if (
+    params.deliveryPlan.mode !== "announce" ||
+    params.toolPolicy.disableMessageTool ||
+    !params.resolvedDelivery.ok
+  ) {
+    return undefined;
+  }
+  return "message_tool_only";
+}
+
 function canPromptForMessageTool(params: {
   disableMessageTool: boolean;
   toolsAllow?: string[];
@@ -424,6 +457,7 @@ type RunCronAgentTurnParams = {
   abortSignal?: AbortSignal;
   signal?: AbortSignal;
   onExecutionStarted?: (info?: CronAgentExecutionStarted) => void;
+  onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
   sessionKey: string;
   agentId?: string;
   lane?: string;
@@ -441,6 +475,7 @@ type PreparedCronRunContext = {
   agentDir: string;
   agentSessionKey: string;
   runSessionId: string;
+  currentRunSessionId: () => string;
   runSessionKey: string;
   workspaceDir: string;
   commandBody: string;
@@ -451,12 +486,22 @@ type PreparedCronRunContext = {
   deliveryPlan: CronDeliveryPlan;
   resolvedDelivery: ResolvedCronDeliveryTarget;
   deliveryRequested: boolean;
+  sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
   suppressExecNotifyOnExit: boolean;
+  senderIsOwner: boolean;
   toolPolicy: ReturnType<typeof resolveCronToolPolicy>;
   skillsSnapshot: SkillSnapshot;
   liveSelection: CronLiveSelection;
+  useSubagentFallbacks: boolean;
   thinkLevel: ThinkLevel | undefined;
   timeoutMs: number;
+  /**
+   * Set when the cron payload's `timeoutSeconds` was explicitly configured
+   * for this run (independent of whether its numeric value happens to equal
+   * `agents.defaults.timeoutSeconds`). Forwarded to the embedded runner so
+   * the LLM idle watchdog can honor the cron's per-run choice.
+   */
+  runTimeoutOverrideMs?: number;
 };
 
 type CronPreparationResult =
@@ -521,6 +566,13 @@ async function prepareCronRunContext(params: {
   });
   const workspaceDir = workspace.dir;
 
+  const { ensureRuntimePluginsLoaded } = await loadRuntimePlugins();
+  ensureRuntimePluginsLoaded({
+    config: cfgWithAgentDefaults,
+    workspaceDir,
+    allowGatewaySubagentBinding: true,
+  });
+
   const isGmailHook = hookExternalContentSource === "gmail";
   const now = Date.now();
   const cronSession = resolveCronSession({
@@ -531,6 +583,7 @@ async function prepareCronRunContext(params: {
     forceNew: input.job.sessionTarget === "isolated",
   });
   const runSessionId = cronSession.sessionEntry.sessionId;
+  const currentRunSessionId = () => cronSession.sessionEntry.sessionId ?? runSessionId;
   if (!cronSession.sessionEntry.sessionFile?.trim()) {
     cronSession.sessionEntry.sessionFile = resolveSessionTranscriptPath(runSessionId, agentId);
   }
@@ -548,7 +601,7 @@ async function prepareCronRunContext(params: {
   });
   const withRunSession: WithRunSession = (result) => ({
     ...result,
-    sessionId: runSessionId,
+    sessionId: currentRunSessionId(),
     sessionKey: runSessionKey,
   });
   if (!cronSession.sessionEntry.label?.trim() && baseSessionKey.startsWith("cron:")) {
@@ -583,6 +636,7 @@ async function prepareCronRunContext(params: {
   }
   let provider = resolvedModelSelection.provider;
   let model = resolvedModelSelection.model;
+  const useSubagentFallbacks = resolvedModelSelection.modelSource === "subagent";
 
   const preflight = await (
     await loadCronModelPreflightRuntime()
@@ -639,11 +693,24 @@ async function prepareCronRunContext(params: {
     }
   }
 
+  const explicitTimeoutSeconds =
+    input.job.payload.kind === "agentTurn" ? input.job.payload.timeoutSeconds : undefined;
   const timeoutMs = resolveAgentTimeoutMs({
     cfg: cfgWithAgentDefaults,
-    overrideSeconds:
-      input.job.payload.kind === "agentTurn" ? input.job.payload.timeoutSeconds : undefined,
+    overrideSeconds: explicitTimeoutSeconds,
   });
+  // Carry the "this run had an explicit per-run timeout" signal forward.
+  // `resolveAgentTimeoutMs` collapses overrideSeconds + the agent default into
+  // one number; the LLM idle watchdog at the embedded-runner attempt loses the
+  // explicit-vs-default distinction without this companion field, which would
+  // otherwise force the implicit 120 s cap whenever the cron payload's
+  // `timeoutSeconds` happens to numerically equal `agents.defaults.timeoutSeconds`.
+  const runTimeoutOverrideMs =
+    typeof explicitTimeoutSeconds === "number" &&
+    Number.isFinite(explicitTimeoutSeconds) &&
+    explicitTimeoutSeconds > 0
+      ? explicitTimeoutSeconds * 1000
+      : undefined;
   const agentPayload = input.job.payload.kind === "agentTurn" ? input.job.payload : null;
   const { deliveryPlan, deliveryRequested, resolvedDelivery, toolPolicy } =
     await resolveCronDeliveryContext({
@@ -651,6 +718,11 @@ async function prepareCronRunContext(params: {
       job: input.job,
       agentId,
     });
+  const sourceReplyDeliveryMode = resolveCronSourceReplyDeliveryMode({
+    deliveryPlan,
+    resolvedDelivery,
+    toolPolicy,
+  });
 
   const { formattedTime, timeLine } = resolveCronStyleNow(input.cfg, now);
   const base = `[cron:${input.job.id} ${input.job.name}] ${input.message}`.trim();
@@ -735,6 +807,17 @@ async function prepareCronRunContext(params: {
         ).resolveSessionAuthProfileOverride({
           cfg: cfgWithAgentDefaults,
           provider,
+          acceptedProviderIds: listOpenAIAuthProfileProvidersForAgentRuntime({
+            provider,
+            harnessRuntime: resolveAgentHarnessPolicy({
+              provider,
+              modelId: model,
+              config: cfgWithAgentDefaults,
+              agentId,
+              sessionKey: agentSessionKey,
+            }).runtime,
+            config: cfgWithAgentDefaults,
+          }),
           agentDir,
           sessionEntry: cronSession.sessionEntry,
           sessionStore: cronSession.store,
@@ -761,6 +844,7 @@ async function prepareCronRunContext(params: {
       agentDir,
       agentSessionKey,
       runSessionId,
+      currentRunSessionId,
       runSessionKey,
       workspaceDir,
       commandBody,
@@ -771,12 +855,16 @@ async function prepareCronRunContext(params: {
       deliveryPlan,
       resolvedDelivery,
       deliveryRequested,
+      sourceReplyDeliveryMode,
       suppressExecNotifyOnExit: deliveryPlan.mode === "none",
+      senderIsOwner: !isExternalHook,
       toolPolicy,
       skillsSnapshot,
       liveSelection,
+      useSubagentFallbacks,
       thinkLevel,
       timeoutMs,
+      runTimeoutOverrideMs,
     },
   };
 }
@@ -795,6 +883,11 @@ async function finalizeCronRun(params: {
   if (finalRunResult.meta?.systemPromptReport) {
     prepared.cronSession.sessionEntry.systemPromptReport = finalRunResult.meta.systemPromptReport;
   }
+  adoptCronRunSessionMetadata({
+    entry: prepared.cronSession.sessionEntry,
+    sessionKey: prepared.agentSessionKey,
+    runMeta: finalRunResult.meta?.agentMeta,
+  });
   const usage = finalRunResult.meta?.agentMeta?.usage;
   const promptTokens = finalRunResult.meta?.agentMeta?.promptTokens;
   const modelUsed =
@@ -974,7 +1067,7 @@ async function finalizeCronRun(params: {
     agentId: prepared.agentId,
     agentSessionKey: prepared.agentSessionKey,
     runSessionKey: prepared.runSessionKey,
-    sessionId: prepared.runSessionId,
+    sessionId: prepared.currentRunSessionId(),
     runStartedAt: execution.runStartedAt,
     runEndedAt: execution.runEndedAt,
     timeoutMs: prepared.timeoutMs,
@@ -1048,6 +1141,7 @@ export async function runCronIsolatedAgentTurn(params: {
   abortSignal?: AbortSignal;
   signal?: AbortSignal;
   onExecutionStarted?: (info?: CronAgentExecutionStarted) => void;
+  onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
   sessionKey: string;
   agentId?: string;
   lane?: string;
@@ -1069,9 +1163,26 @@ export async function runCronIsolatedAgentTurn(params: {
     params.onExecutionStarted?.({
       jobId: params.job.id,
       agentId: prepared.context.agentId,
-      sessionId: prepared.context.runSessionId,
+      sessionId: prepared.context.currentRunSessionId(),
       sessionKey: prepared.context.runSessionKey,
+      phase: "runner_entered",
+      provider: prepared.context.liveSelection.provider,
+      model: prepared.context.liveSelection.model,
     });
+  const notifyExecutionPhase = (
+    info: Pick<CronAgentExecutionPhaseUpdate, "phase"> &
+      Partial<Omit<CronAgentExecutionPhaseUpdate, "jobId" | "phase">>,
+  ) => {
+    params.onExecutionPhase?.({
+      jobId: params.job.id,
+      agentId: prepared.context.agentId,
+      sessionId: prepared.context.currentRunSessionId(),
+      sessionKey: prepared.context.runSessionKey,
+      provider: prepared.context.liveSelection.provider,
+      model: prepared.context.liveSelection.model,
+      ...info,
+    });
+  };
 
   try {
     const { executeCronRun } = await loadCronExecutorRuntime();
@@ -1091,9 +1202,11 @@ export async function runCronIsolatedAgentTurn(params: {
         accountId: prepared.context.resolvedDelivery.accountId,
         threadId: prepared.context.resolvedDelivery.threadId,
       },
+      sourceReplyDeliveryMode: prepared.context.sourceReplyDeliveryMode,
       toolPolicy: prepared.context.toolPolicy,
       skillsSnapshot: prepared.context.skillsSnapshot,
       agentPayload: prepared.context.agentPayload,
+      useSubagentFallbacks: prepared.context.useSubagentFallbacks,
       agentVerboseDefault: prepared.context.agentCfg?.verboseDefault,
       liveSelection: prepared.context.liveSelection,
       cronSession: prepared.context.cronSession,
@@ -1101,11 +1214,14 @@ export async function runCronIsolatedAgentTurn(params: {
       persistSessionEntry: prepared.context.persistSessionEntry,
       abortSignal,
       onExecutionStarted: notifyExecutionStarted,
+      onExecutionPhase: notifyExecutionPhase,
       abortReason,
       isAborted,
       thinkLevel: prepared.context.thinkLevel,
       timeoutMs: prepared.context.timeoutMs,
+      runTimeoutOverrideMs: prepared.context.runTimeoutOverrideMs,
       suppressExecNotifyOnExit: prepared.context.suppressExecNotifyOnExit,
+      senderIsOwner: prepared.context.senderIsOwner,
     });
     if (isAborted()) {
       return prepared.context.withRunSession({
@@ -1121,10 +1237,15 @@ export async function runCronIsolatedAgentTurn(params: {
       isAborted,
     });
   } catch (err) {
+    const isCronLaneTimeout = isAborted() || isCronNestedLaneTaskTimeoutError(err);
+    const error = isCronLaneTimeout ? abortReason() : String(err);
     return prepared.context.withRunSession({
       status: "error",
-      error: String(err),
-      diagnostics: createCronRunDiagnosticsFromError("agent-run", err),
+      error,
+      diagnostics: createCronRunDiagnosticsFromError(
+        isCronLaneTimeout ? "cron-setup" : "agent-run",
+        isCronLaneTimeout ? error : err,
+      ),
     });
   }
 }

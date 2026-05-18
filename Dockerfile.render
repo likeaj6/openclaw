@@ -9,10 +9,26 @@
 #   upstream prebuilt image and just layers in the Render-specific entrypoint,
 #   so Render's build step is tiny and never touches the 8 GB limit.
 #
-# When you merge upstream/main, bump the pinned tag below to a recent release
-# from https://github.com/openclaw/openclaw/pkgs/container/openclaw (or use
-# `:latest` if you prefer the bleeding edge over reproducibility).
-FROM ghcr.io/openclaw/openclaw:2026.5.3-1
+# Supply-chain hardening:
+# Pinned by immutable digest, not just by tag. Tags on GHCR are mutable: if the
+# upstream openclaw maintainer account is ever compromised, an attacker can
+# re-push `:2026.5.3-1` with malicious bits and every Render build will silently
+# pull the poisoned image. Pinning by `@sha256:...` makes that impossible — the
+# image bytes are content-addressed.
+#
+# When you merge upstream/main and want a newer release:
+#   1. Pick a version from https://github.com/openclaw/openclaw/pkgs/container/openclaw
+#   2. Resolve its digest:
+#        TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:openclaw/openclaw:pull" | jq -r .token)
+#        curl -sI -H "Authorization: Bearer $TOKEN" \
+#          -H "Accept: application/vnd.oci.image.index.v1+json" \
+#          "https://ghcr.io/v2/openclaw/openclaw/manifests/<VERSION>" | grep -i docker-content-digest
+#   3. (Optional but recommended) Verify the SLSA provenance attestation:
+#        gh attestation verify oci://ghcr.io/openclaw/openclaw@<digest> \
+#          --repo openclaw/openclaw
+#   4. Update both the tag comment and the @sha256 below.
+# Tag retained alongside the digest for human readability; the digest is what is enforced.
+FROM ghcr.io/openclaw/openclaw:2026.5.12@sha256:e2482a66682de6f540dcfd9921e410c23fd060dcd441382ff952247ee911a672
 
 # COPY/chown need root; upstream image runs as `node` by default.
 USER root

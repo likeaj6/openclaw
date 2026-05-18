@@ -1,6 +1,10 @@
 import { importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  __testing as replyRunTesting,
+  createReplyOperation,
+} from "../../auto-reply/reply/reply-run-registry.js";
+import {
   __testing,
   abortAndDrainEmbeddedPiRun,
   abortEmbeddedPiRun,
@@ -8,7 +12,9 @@ import {
   consumeEmbeddedRunModelSwitch,
   getActiveEmbeddedRunSnapshot,
   isEmbeddedPiRunHandleActive,
-  queueEmbeddedPiMessage,
+  formatEmbeddedPiQueueFailureSummary,
+  queueEmbeddedPiMessageWithOutcome,
+  queueEmbeddedPiMessageWithOutcomeAsync,
   requestEmbeddedRunModelSwitch,
   resolveActiveEmbeddedRunHandleSessionId,
   setActiveEmbeddedRun,
@@ -19,13 +25,19 @@ import {
 type RunHandle = Parameters<typeof setActiveEmbeddedRun>[1];
 
 function createRunHandle(
-  overrides: { isCompacting?: boolean; abort?: () => void } = {},
+  overrides: {
+    abort?: () => void;
+    isCompacting?: boolean;
+    isStreaming?: boolean;
+    supportsTranscriptCommitWait?: boolean;
+  } = {},
 ): RunHandle {
   const abort = overrides.abort ?? (() => {});
   return {
     queueMessage: async () => {},
-    isStreaming: () => true,
+    isStreaming: () => overrides.isStreaming ?? true,
     isCompacting: () => overrides.isCompacting ?? false,
+    supportsTranscriptCommitWait: overrides.supportsTranscriptCommitWait,
     abort,
   };
 }
@@ -33,6 +45,7 @@ function createRunHandle(
 describe("pi-embedded runner run registry", () => {
   afterEach(() => {
     __testing.resetActiveEmbeddedRuns();
+    replyRunTesting.resetReplyRunRegistry();
     vi.restoreAllMocks();
   });
 
@@ -71,14 +84,46 @@ describe("pi-embedded runner run registry", () => {
     const queueMessage = vi.fn(async () => {});
     setActiveEmbeddedRun("session-steer", {
       ...createRunHandle(),
+      sourceReplyDeliveryMode: "message_tool_only",
       queueMessage,
     });
 
     expect(
-      queueEmbeddedPiMessage("session-steer", "continue", { steeringMode: "one-at-a-time" }),
+      queueEmbeddedPiMessageWithOutcome("session-steer", "continue", {
+        steeringMode: "all",
+        sourceReplyDeliveryMode: "message_tool_only",
+      }).queued,
     ).toBe(true);
 
-    expect(queueMessage).toHaveBeenCalledWith("continue", { steeringMode: "one-at-a-time" });
+    expect(queueMessage).toHaveBeenCalledWith("continue", {
+      steeringMode: "all",
+      sourceReplyDeliveryMode: "message_tool_only",
+    });
+  });
+
+  it("rejects message-tool-only steering for active runs created without that mode", () => {
+    const queueMessage = vi.fn(async () => {});
+    setActiveEmbeddedRun("session-automatic-source-reply", {
+      ...createRunHandle(),
+      queueMessage,
+    });
+
+    const outcome = queueEmbeddedPiMessageWithOutcome(
+      "session-automatic-source-reply",
+      "continue",
+      {
+        steeringMode: "all",
+        sourceReplyDeliveryMode: "message_tool_only",
+      },
+    );
+
+    expect(outcome).toEqual({
+      queued: false,
+      sessionId: "session-automatic-source-reply",
+      reason: "source_reply_delivery_mode_mismatch",
+      gatewayHealth: "live",
+    });
+    expect(queueMessage).not.toHaveBeenCalled();
   });
 
   it("defaults active embedded steering to all pending messages", () => {
@@ -88,9 +133,123 @@ describe("pi-embedded runner run registry", () => {
       queueMessage,
     });
 
-    expect(queueEmbeddedPiMessage("session-default-steer", "continue")).toBe(true);
+    expect(queueEmbeddedPiMessageWithOutcome("session-default-steer", "continue").queued).toBe(
+      true,
+    );
 
     expect(queueMessage).toHaveBeenCalledWith("continue", { steeringMode: "all" });
+  });
+
+  it("returns a structured no-active-run queue failure", () => {
+    const outcome = queueEmbeddedPiMessageWithOutcome("session-missing", "continue");
+
+    expect(outcome).toEqual({
+      queued: false,
+      sessionId: "session-missing",
+      reason: "no_active_run",
+      gatewayHealth: "live",
+    });
+    expect(formatEmbeddedPiQueueFailureSummary(outcome)).toBe(
+      "queue_message_failed reason=no_active_run sessionId=session-missing gatewayHealth=live",
+    );
+  });
+
+  it("returns structured queue failures for inactive active-run states", () => {
+    setActiveEmbeddedRun("session-not-streaming", createRunHandle({ isStreaming: false }));
+    setActiveEmbeddedRun("session-compacting", createRunHandle({ isCompacting: true }));
+
+    expect(queueEmbeddedPiMessageWithOutcome("session-not-streaming", "continue")).toEqual({
+      queued: false,
+      sessionId: "session-not-streaming",
+      reason: "not_streaming",
+      gatewayHealth: "live",
+    });
+    expect(queueEmbeddedPiMessageWithOutcome("session-compacting", "continue")).toEqual({
+      queued: false,
+      sessionId: "session-compacting",
+      reason: "compacting",
+      gatewayHealth: "live",
+    });
+  });
+
+  it("returns runtime rejection details when async queue delivery fails", async () => {
+    setActiveEmbeddedRun("session-rejected", {
+      ...createRunHandle(),
+      queueMessage: async () => {
+        throw new Error("cannot steer a compact turn");
+      },
+    });
+
+    const outcome = await queueEmbeddedPiMessageWithOutcomeAsync("session-rejected", "continue");
+
+    expect(outcome).toEqual({
+      queued: false,
+      sessionId: "session-rejected",
+      reason: "runtime_rejected",
+      gatewayHealth: "live",
+      errorMessage: "cannot steer a compact turn",
+    });
+    expect(formatEmbeddedPiQueueFailureSummary(outcome)).toBe(
+      "queue_message_failed reason=runtime_rejected sessionId=session-rejected gatewayHealth=live error=cannot steer a compact turn",
+    );
+  });
+
+  it("rejects transcript-commit waits for active handles without support", async () => {
+    const queueMessage = vi.fn(async () => {});
+    setActiveEmbeddedRun("session-no-transcript-wait", {
+      ...createRunHandle(),
+      queueMessage,
+    });
+
+    const outcome = await queueEmbeddedPiMessageWithOutcomeAsync(
+      "session-no-transcript-wait",
+      "continue",
+      { waitForTranscriptCommit: true },
+    );
+
+    expect(outcome).toEqual({
+      queued: false,
+      sessionId: "session-no-transcript-wait",
+      reason: "transcript_commit_wait_unsupported",
+      gatewayHealth: "live",
+    });
+    expect(queueMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps reply-run fallback reachable for transcript-commit wait requests", async () => {
+    const queueMessage = vi.fn(async () => {});
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:main",
+      sessionId: "session-reply-run",
+      resetTriggered: false,
+    });
+    operation.attachBackend({
+      kind: "embedded",
+      cancel: vi.fn(),
+      isStreaming: () => true,
+      queueMessage,
+    });
+    operation.setPhase("running");
+
+    const outcome = await queueEmbeddedPiMessageWithOutcomeAsync(
+      "session-reply-run",
+      "completion from child",
+      { waitForTranscriptCommit: true },
+    );
+
+    expect(outcome.queued).toBe(true);
+    if (!outcome.queued) {
+      throw new Error("expected reply-run fallback to queue");
+    }
+    expect(outcome).toMatchObject({
+      queued: true,
+      sessionId: "session-reply-run",
+      target: "reply_run",
+      gatewayHealth: "live",
+    });
+    expect(outcome.enqueuedAtMs).toEqual(expect.any(Number));
+    expect(outcome.deliveredAtMs).toBeUndefined();
+    expect(queueMessage).toHaveBeenCalledWith("completion from child");
   });
 
   it("force-clears an aborted run that does not drain", async () => {
